@@ -11,19 +11,22 @@ keywords = ["ssh", "tarpit", "security", "server"]
 readme = "README.md"
 
 [features]
-default = ["sandbox", "drop_privs"]
+default = ["sandbox", "drop_privs", "exporters"]
 sandbox = ["rusty-sandbox"]
 drop_privs = ["privdrop"]
+exporters = ["hyper"]
 
 [dependencies]
-env_logger = "0.7.1"
-exitcode = "1.1.2"
-futures = "0.3.4"
-futures-util = "0.3.4"
-log = "0.4.8"
-structopt = "0.3.11"
-tokio = { version = "0.2.13", features = ["signal", "sync", "net", "time", "tcp", "io-driver", "io-util", "rt-threaded"] }
+env_logger = "0.7"
+exitcode = "1.1"
+futures = "0.3"
+futures-util = "0.3"
+log = "0.4"
+rand = "0.7"
+structopt = "0.3"
+tokio = { version = "0.2", features = ["signal", "sync", "net", "time", "tcp", "io-driver", "io-util", "rt-threaded"] }
+hyper = { version = "0.13", optional = true }
 
 [target."cfg(unix)".dependencies]
 rusty-sandbox = { version = "0.2", optional = true }
-privdrop = { version = "0.3.4", optional = true }
+privdrop = { version = "0.3", optional = true }

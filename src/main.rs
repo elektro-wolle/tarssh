@@ -1,245 +1,129 @@
+//! …
+
+#![warn(clippy::all)]
+#![warn(missing_docs)]
+#![warn(future_incompatible)]
+#![deny(unused_must_use)]
+
 #![cfg_attr(feature = "nightly", feature(external_doc))]
 #![cfg_attr(feature = "nightly", doc(include = "../README.md"))]
 
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+/// Export some statistics.
+#[cfg(feature = "exporters")]
+mod exporters;
+/// Listen to ssh-connections.
+mod listeners;
+/// Everything to do with keeping track what happend.
+mod logging;
+/// Collect some statistics.
+mod metrics;
+/// Drop privileges.
+#[cfg(all(unix, feature = "drop_privs"))]
+mod privilege_dropper;
+/// Parallel execution of tasks.
+mod runtime;
+/// The actual ssh-tarpit.
+mod tarpit;
 
-use env_logger;
-use exitcode;
-use futures::stream::StreamExt;
-use futures_util::future::FutureExt;
-use log::LevelFilter;
+use listeners::Listeners;
 use log::{error, info, warn};
-use structopt;
+#[cfg(not(feature = "exporters"))]
+use metrics::Metrics;
+#[cfg(not(feature = "exporters"))]
+use std::sync::Arc;
+#[cfg(feature = "exporters")]
+use exporters::Exporter;
+#[cfg(all(unix, feature = "drop_privs"))]
+use privilege_dropper::PrivDropConfig;
+use runtime::Runtime;
+use std::{
+    io::{
+        BufReader,
+        prelude::*,
+    },
+    fs::File,
+    net::SocketAddr,
+    time::Duration,
+};
 use structopt::StructOpt;
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpListener;
-use tokio::time::{delay_for, timeout};
-
-#[cfg(unix)]
-use tokio::signal::unix::{signal, SignalKind};
 
 #[cfg(all(unix, feature = "sandbox"))]
 use rusty_sandbox::Sandbox;
 
-#[cfg(all(unix, feature = "drop_privs"))]
-use privdrop::PrivDrop;
-
-#[cfg(all(unix, feature = "drop_privs"))]
-use std::path::PathBuf;
-
-#[cfg(all(unix, feature = "drop_privs"))]
-use std::ffi::OsString;
-
-static NUM_CLIENTS: AtomicUsize = AtomicUsize::new(0);
-static BANNER: &[&str] = &[
-    "My name is Yon",
-    " Yonson\r\nI liv",
-    "e in Wisconsin",
-    ".\r\nThere, the ",
-    "people I meet\r",
-    "\nAs I walk dow",
-    "n the street\r\n",
-    "Say \"Hey, what",
-    "'s your name?\"",
-    "\r\nAnd I say:\r\n",
-];
-
 #[derive(Debug, StructOpt)]
 #[structopt(name = "tarssh", about = "A SSH tarpit server")]
 struct Config {
-    /// Listen address(es) to bind to
+    /// Listen address(es) to bind to of the tarpit.
     #[structopt(short = "l", long = "listen", default_value = "0.0.0.0:2222")]
     listen: Vec<SocketAddr>,
-    /// Best-effort connection limit
+    /// Best-effort connection limit.
     #[structopt(short = "c", long = "max-clients", default_value = "4096")]
     max_clients: u32,
-    /// Seconds between responses
+    /// Seconds between responses.
     #[structopt(short = "d", long = "delay", default_value = "10")]
     delay: u64,
-    /// Socket write timeout
+    /// Socket write timeout.
     #[structopt(short = "t", long = "timeout", default_value = "30")]
     timeout: u64,
-    /// Verbose level (repeat for more verbosity)
+    /// Verbose level (repeat for more verbosity).
     #[structopt(short = "v", long = "verbose", parse(from_occurrences))]
     verbose: u8,
-    /// Use threads, with optional thread count
+    /// Use threads, with optional thread count.
     #[structopt(long = "threads")]
     #[allow(clippy::option_option)]
     threads: Option<Option<usize>>,
-    /// Disable timestamps in logs
+    /// Disable timestamps in logs.
     #[structopt(long)]
     disable_log_timestamps: bool,
-    /// Disable module name in logs (e.g. "tarssh")
+    /// Disable module name in logs (e.g. "tarssh").
     #[structopt(long)]
     disable_log_ident: bool,
-    /// Disable log level in logs (e.g. "info")
+    /// Disable log level in logs (e.g. "info").
     #[structopt(long)]
     disable_log_level: bool,
     #[cfg(all(unix, feature = "drop_privs"))]
     #[structopt(flatten)]
     #[cfg(all(unix, feature = "drop_privs"))]
     privdrop: PrivDropConfig,
+    /// Filename of the tarpit-message.
+    #[structopt(short = "m", long = "message", default_value = "")]
+    message: String,
+    /// Listen address(es) to bind to of the exporter.
+    #[structopt(short = "e", long = "exporter", default_value = "0.0.0.0:8080")]
+    #[cfg(feature = "exporters")]
+    exporter: Vec<SocketAddr>,
 }
 
-#[cfg(all(unix, feature = "drop_privs"))]
-#[derive(Debug, StructOpt)]
-struct PrivDropConfig {
-    /// Run as this user and their primary group
-    #[structopt(short = "u", long = "user", parse(from_os_str))]
-    user: Option<OsString>,
-    /// Run as this group
-    #[structopt(short = "g", long = "group", parse(from_os_str))]
-    group: Option<OsString>,
-    /// Chroot to this directory
-    #[structopt(long = "chroot", parse(from_os_str))]
-    chroot: Option<PathBuf>,
-}
-
-fn errx<M: AsRef<str>>(code: i32, message: M) -> ! {
+pub(crate) fn errx<M: AsRef<str>>(code: i32, message: M) -> ! {
     error!("{}", message.as_ref());
     std::process::exit(code);
 }
 
-async fn tarpit_connection(
-    mut sock: tokio::net::TcpStream,
-    peer: SocketAddr,
-    delay: Duration,
-    time_out: Duration,
-) {
-    let start = Instant::now();
-    sock.set_recv_buffer_size(1)
-        .unwrap_or_else(|err| warn!("set_recv_buffer_size(), error: {}", err));
-
-    sock.set_send_buffer_size(16)
-        .unwrap_or_else(|err| warn!("set_send_buffer_size(), error: {}", err));
-
-    for chunk in BANNER.iter().cycle() {
-        delay_for(delay).await;
-
-        let res = timeout(time_out, sock.write_all(chunk.as_bytes()))
-            .await
-            .unwrap_or_else(|_| Err(std::io::Error::new(std::io::ErrorKind::Other, "timed out")));
-
-        if let Err(err) = res {
-            let connected = NUM_CLIENTS.fetch_sub(1, Ordering::Relaxed) - 1;
-            info!(
-                "disconnect, peer: {}, duration: {:.2?}, error: \"{}\", clients: {}",
-                peer,
-                start.elapsed(),
-                err,
-                connected
-            );
-            break;
-        }
-    }
-}
-
-fn main() {
+fn main() -> std::io::Result<()> {
     let opt = Config::from_args();
 
-    let max_clients = opt.max_clients as usize;
-    let delay = Duration::from_secs(opt.delay);
-    let timeout = Duration::from_secs(opt.timeout);
-    let log_level = match opt.verbose {
-        0 => LevelFilter::Off,
-        1 => LevelFilter::Info,
-        2 => LevelFilter::Debug,
-        _ => LevelFilter::Trace,
-    };
-
-    env_logger::Builder::from_default_env()
-        .filter(None, log_level)
-        .format_timestamp(if opt.disable_log_timestamps {
-            None
-        } else {
-            Some(env_logger::fmt::TimestampPrecision::Millis)
-        })
-        .format_module_path(!opt.disable_log_ident)
-        .format_level(!opt.disable_log_level)
-        .init();
-
-    let mut rt = tokio::runtime::Builder::new();
-    let mut scheduler;
-
-    if let Some(threaded) = opt.threads {
-        rt.threaded_scheduler();
-
-        scheduler = "threaded".to_string();
-
-        if let Some(threads) = threaded {
-            let threads = threads.min(512).max(1);
-            rt.core_threads(threads);
-            scheduler = format!("threaded, threads: {}", threads);
-        }
-    } else {
-        scheduler = "basic".to_string();
-        rt.basic_scheduler();
-    }
-
-    info!(
-        "init, version: {}, scheduler: {}",
-        env!("CARGO_PKG_VERSION"),
-        scheduler
+    logging::init(
+        opt.verbose,
+        !opt.disable_log_timestamps,
+        !opt.disable_log_ident,
+        !opt.disable_log_level,
     );
 
-    let mut rt = rt
-        .enable_all()
-        .build()
-        .unwrap_or_else(|err| errx(exitcode::UNAVAILABLE, format!("tokio, error: {:?}", err)));
+    let mut runtime = Runtime::new(opt.threads);
 
-    let startup = Instant::now();
+    let listeners = Listeners::new(
+        &mut runtime,
+        opt.listen,
+    );
 
-    let listeners: Vec<_> = opt
-        .listen
-        .iter()
-        .map(
-            |addr| match rt.block_on(async { TcpListener::bind(addr).await }) {
-                Ok(listener) => {
-                    info!("listen, addr: {}", addr);
-                    listener
-                }
-                Err(err) => {
-                    errx(
-                        exitcode::OSERR,
-                        format!("listen, addr: {}, error: {}", addr, err),
-                    );
-                }
-            },
-        )
-        .collect();
+    #[cfg(feature = "exporters")]
+    let exporters = Exporter::new(
+        &mut runtime,
+        opt.exporter,
+    );
 
     #[cfg(all(unix, feature = "drop_privs"))]
-    {
-        if opt.privdrop.user.is_some()
-            || opt.privdrop.group.is_some()
-            || opt.privdrop.chroot.is_some()
-        {
-            let mut pd = PrivDrop::default();
-            if let Some(path) = opt.privdrop.chroot {
-                info!("privdrop, chroot: {}", path.display());
-                pd = pd.chroot(path);
-            }
-
-            if let Some(user) = opt.privdrop.user {
-                info!("privdrop, user: {}", user.to_string_lossy());
-                pd = pd.user(user);
-            }
-
-            if let Some(group) = opt.privdrop.group {
-                info!("privdrop, group: {}", group.to_string_lossy());
-                pd = pd.group(group);
-            }
-
-            pd.apply()
-                .unwrap_or_else(|err| errx(exitcode::OSERR, format!("privdrop, error: {}", err)));
-
-            info!("privdrop, enabled: true");
-        } else {
-            info!("privdrop, enabled: false");
-        }
-    }
+    opt.privdrop.drop();
 
     #[cfg(all(unix, feature = "sandbox"))]
     {
@@ -247,68 +131,43 @@ fn main() {
         info!("sandbox, enabled: {}", sandboxed);
     }
 
-    info!(
-        "start, servers: {}, max_clients: {}, delay: {}s, timeout: {}s",
-        listeners.len(),
-        opt.max_clients,
-        delay.as_secs(),
-        timeout.as_secs()
+    #[cfg(feature = "exporters")]
+    let metrics = exporters.spawn(&runtime);
+    #[cfg(not(feature = "exporters"))]
+    let metrics = std::sync::Arc::new(metrics::Metrics::new(runtime.start()));
+
+    listeners.spawn(
+        &runtime,
+        opt.max_clients as usize,
+        Duration::from_secs(opt.delay),
+        Duration::from_secs(opt.timeout),
+        metrics.clone(),
+        if opt.message.is_empty() {
+            format!(
+                "{}\r\n{}\r\n{}\r\n{}\r\n{}\r\n{}\r\n",
+                "My name is Yon Yonson",
+                "I live in Wisconsin.",
+                "There, the people I meet",
+                "As I walk down the street",
+                "Say “Hey, what’s your name?”",
+                "And I say:",
+            )
+        } else {
+            BufReader::new(File::open(opt.message)?)
+            .lines()
+            .try_fold(
+                String::new(),
+                |mut result, line| if let Ok(line) = line {
+                    result.push_str(&line);
+                    result.push_str("\r\n");
+                    Ok(result)
+                } else {
+                    line
+                },
+            )?
+        },
     );
 
-    for mut listener in listeners {
-        let server = async move {
-            loop {
-                match listener.accept().await {
-                    Ok((sock, peer)) => {
-                        let connected = NUM_CLIENTS.fetch_add(1, Ordering::Relaxed) + 1;
-
-                        if connected > max_clients {
-                            NUM_CLIENTS.fetch_sub(1, Ordering::Relaxed);
-                            info!("reject, peer: {}, clients: {}", peer, connected);
-                        } else {
-                            info!("connect, peer: {}, clients: {}", peer, connected);
-                            tokio::spawn(tarpit_connection(sock, peer, delay, timeout));
-                        }
-                    }
-                    Err(err) => match err.kind() {
-                        std::io::ErrorKind::ConnectionRefused
-                        | std::io::ErrorKind::ConnectionAborted
-                        | std::io::ErrorKind::ConnectionReset => (),
-                        _ => {
-                            let wait = Duration::from_millis(100);
-                            warn!("accept, err: {}, wait: {:?}", err, wait);
-                            delay_for(wait).await;
-                        }
-                    },
-                }
-            }
-        };
-
-        rt.spawn(server);
-    }
-
-    let shutdown = async {
-        let interrupt = tokio::signal::ctrl_c().into_stream().map(|_| "interrupt");
-
-        #[cfg(unix)]
-        let mut term = signal(SignalKind::terminate()).unwrap_or_else(|error| {
-            errx(exitcode::UNAVAILABLE, format!("signal(), error: {}", error))
-        });
-        #[cfg(unix)]
-        let term2 = term.recv().into_stream().map(|_| "terminated");
-        #[cfg(unix)]
-        let interrupt = futures_util::stream::select(interrupt, term2);
-
-        if let Some(signal) = interrupt.boxed().next().await {
-            info!("{}", signal);
-        };
-    };
-
-    rt.block_on(shutdown);
-
-    info!(
-        "shutdown, uptime: {:.2?}, clients: {}",
-        startup.elapsed(),
-        NUM_CLIENTS.load(Ordering::Relaxed)
-    )
+    runtime.wait(metrics);
+    Ok(())
 }
