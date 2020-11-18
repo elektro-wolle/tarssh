@@ -28,7 +28,7 @@ that's one less free connection for the next attack.
 ```console
 -% cargo install tarssh
 -% tarssh --help
-tarssh 0.4.0
+tarssh 0.4.0-metrics
 A SSH tarpit server
 
 USAGE:
@@ -45,9 +45,11 @@ FLAGS:
 OPTIONS:
         --chroot <chroot>              Chroot to this directory
     -d, --delay <delay>                Seconds between responses [default: 10]
+    -e, --exporter <exporter>...       Listen address(es) to bind to of the exporter [default: 0.0.0.0:8080]
     -g, --group <group>                Run as this group
-    -l, --listen <listen>...           Listen address(es) to bind to [default: 0.0.0.0:2222]
+    -l, --listen <listen>...           Listen address(es) to bind to of the tarpit [default: 0.0.0.0:2222]
     -c, --max-clients <max-clients>    Best-effort connection limit [default: 4096]
+    -m, --message <message>            Filename of the tarpit-message [default: ]
         --threads <threads>            Use threads, with optional thread count
     -t, --timeout <timeout>            Socket write timeout [default: 30]
     -u, --user <user>                  Run as this user and their primary group
@@ -55,18 +57,26 @@ OPTIONS:
 
 
 -% tarssh -v --disable-log-timestamps -l 0.0.0.0:2222 \[::]:2222
-[INFO  tarssh] init, version: 0.4.0, scheduler: basic
-[INFO  tarssh] listen, addr: 0.0.0.0:2222
-[INFO  tarssh] listen, addr: [::]:2222
-[INFO  tarssh] privdrop, enabled: false
-[INFO  tarssh] sandbox, enabled: true
-[INFO  tarssh] start, servers: 2, max_clients: 4096, delay: 10s, timeout: 30s
-[INFO  tarssh] connect, peer: 127.0.0.1:39410, clients: 1
-[INFO  tarssh] connect, peer: 127.0.0.1:39424, clients: 2
-[INFO  tarssh] disconnect, peer: 127.0.0.1:39410, duration: 20.02s, error: "Broken pipe (os error 32)", clients: 1
-[INFO  tarssh] disconnect, peer: 127.0.0.1:39424, duration: 20.06s, error: "Broken pipe (os error 32)", clients: 0
-^C[INFO  tarssh] interrupt
-[INFO  tarssh] shutdown, uptime: 71.50s, clients: 0
+[INFO  tarssh::runtime] init, version: 0.4.0-metrics, scheduler: basic
+[INFO  tarssh::listeners] listen, addr: 0.0.0.0:2222
+[INFO  tarssh::listeners] listen, addr: [::]:2222
+[INFO  tarssh::exporters] listen, addr: 0.0.0.0:8080
+[INFO  tarssh::privilege_dropper] privdrop, enabled: false
+[INFO  tarssh] sandbox, enabled: false
+[INFO  tarssh::listeners] start, servers: 1, max_clients: 4096, delay: 10s, timeout: 30s, banner:
+    My name is Yon Yonson
+    I live in Wisconsin.
+    There, the people I meet
+    As I walk down the street
+    Say “Hey, what’s your name?”
+    And I say:
+
+[INFO  tarssh::listeners] connect, peer: 127.0.0.1:34532, clients: 1
+[INFO  tarssh::listeners] connect, peer: 127.0.0.1:34540, clients: 2
+[INFO  tarssh::tarpit] disconnect, peer: 127.0.0.1:34540, duration: 20, error: "Broken pipe (os error 32)", clients: 1
+[INFO  tarssh::tarpit] disconnect, peer: 127.0.0.1:34532, duration: 30, error: "Broken pipe (os error 32)", clients: 0
+^C[INFO  tarssh::runtime] interrupt
+[INFO  tarssh::runtime] shutdown, uptime: 43.44s, clients: 0
 ```
 
 A dubiously-maintained Docker image is available as [`freeky/tarssh`][docker-image].
@@ -75,9 +85,9 @@ A dubiously-maintained Docker image is available as [`freeky/tarssh`][docker-ima
 -% sudo docker run --network=host freeky/tarssh
 Unable to find image 'freeky/tarssh:latest' locally
 latest: Pulling from freeky/tarssh
-27833a3ba0a5: Pull complete 
-1fbf3b23257c: Pull complete 
-30379a92040a: Pull complete 
+27833a3ba0a5: Pull complete
+1fbf3b23257c: Pull complete
+30379a92040a: Pull complete
 Digest: sha256:a1eccb7dd694753e0d6ea682f5feed2e17dcfc88d817714502b518c381b94298
 Status: Downloaded newer image for freeky/tarssh:latest
 [2019-04-10T23:02:57Z INFO  tarssh] listen, addr: 0.0.0.0:22

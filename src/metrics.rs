@@ -39,6 +39,7 @@ macro_rules! metric {
 }
 
 use std::{
+    borrow::Cow,
     sync::{atomic::{AtomicUsize, Ordering}, Mutex},
     time::Instant,
 };
@@ -148,7 +149,7 @@ impl Metrics {
     pub(crate) fn disconnect(
         &self,
         token: Token,
-    ) -> Result<Option<Token>, &'static str> {
+    ) -> Result<(usize, u64), Cow<'static, str>> {
       let mut guard = match self.clients.lock() {
           Ok(guard) => guard,
           Err(poisoned) => poisoned.into_inner(),
@@ -159,7 +160,7 @@ impl Metrics {
       };
       if guard.len() > token.uid {
           if let Some(ref client) = guard[token.uid] {
-              self.connections_count.fetch_sub(1, Ordering::Relaxed);
+              let connected = self.connections_count.fetch_sub(1, Ordering::Relaxed);
               let connection_time = client.start.elapsed().as_secs();
               metrics_guard.maximum_connection_time = metrics_guard.maximum_connection_time.max(connection_time);
               metrics_guard.minimum_connection_time = metrics_guard.minimum_connection_time.min(connection_time);
@@ -170,12 +171,12 @@ impl Metrics {
               metrics_guard.sent_eastereggs_sum += client.sent_eastereggs;
               metrics_guard.sent_banners_sum    += client.sent_banners;
               guard[token.uid] = None;
-              Ok(None)
+              Ok((connected-1, connection_time))
           } else {
-              Err("Already Disconnected")
+              Err(Cow::Borrowed("Already Disconnected"))
           }
       } else {
-          Err("Invalid Token")
+          Err(Cow::Borrowed("Invalid Token"))
       }
     }
 

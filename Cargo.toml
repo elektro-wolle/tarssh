@@ -1,8 +1,8 @@
 [package]
 name = "tarssh"
-version = "0.4.0"
+version = "0.4.0-metrics"
 description = "A simple SSH tarpit server"
-authors = ["Thomas Hurst <tom@hur.st>"]
+authors = ["Thomas Hurst <tom@hur.st>", "Sebastian Walz <sivizius@sivizius.eu>"]
 edition = "2018"
 license = "MIT"
 repository = "https://github.com/Freaky/tarssh"

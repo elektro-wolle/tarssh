@@ -84,6 +84,7 @@ impl Listeners {
                                     tokio::spawn(
                                         tarpit_connection(
                                             sock,
+                                            peer,
                                             delay,
                                             timeout,
                                             token,

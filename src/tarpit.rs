@@ -1,5 +1,10 @@
-use std::sync::Arc;
-use std::time::Duration;
+use log::info;
+use std::{
+    borrow::Cow,
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
 
 use log::warn;
 use tokio::io::AsyncWriteExt;
@@ -14,28 +19,63 @@ async fn send_chunk(
     token: Token,
     metrics: &Arc<Metrics>,
     chunk: &[u8],
-) -> Result<Option<Token>, &'static str> {
-    if let Err(_err) = timeout(
+) -> Result<Token, (usize, u64, Cow<'static, str>)> {
+    delay_for(*delay).await;
+    match timeout(
         *time_out,
         sock.write_all(chunk)
     )
-    .await
-    .unwrap_or_else(
-      |_| Err(std::io::Error::new(std::io::ErrorKind::Other, "timed out"))
-    ) {
-        metrics.disconnect(token)
-    } else {
-        delay_for(*delay).await;
-        if let Err(error) = metrics.sent_chunk(&token) {
-            Err(error)
+    .await {
+        Ok(Ok(_)) => if let Err(error) = metrics.sent_chunk(&token) {
+            Err(match metrics.disconnect(token) {
+                Ok((connections, connection_time)) => (
+                    connections,
+                    connection_time,
+                    Cow::Borrowed(error),
+                ),
+                Err(failure) => (
+                    0usize,
+                    0u64,
+                    Cow::Owned(format!("{}\", \"{}", error, failure)),
+                ),
+            })
         } else {
-            Ok(Some(token))
-        }
+            Ok(token)
+        },
+        Err(error) => {
+          Err(match metrics.disconnect(token) {
+              Ok((connections, connection_time)) => (
+                  connections,
+                  connection_time,
+                  Cow::Borrowed("time out"),
+              ),
+              Err(failure) => (
+                  0usize,
+                  0u64,
+                  Cow::Owned(format!("{}\", \"{}", error, failure)),
+              ),
+          })
+        },
+        Ok(Err(error)) => {
+          Err(match metrics.disconnect(token) {
+              Ok((connections, connection_time)) => (
+                  connections,
+                  connection_time,
+                  Cow::Owned(format!("{}", error)),
+              ),
+              Err(failure) => (
+                  0usize,
+                  0u64,
+                  Cow::Owned(format!("{}\", \"{}", error, failure)),
+              ),
+          })
+        },
     }
 }
 
 pub(crate) async fn tarpit_connection(
     mut sock:   tokio::net::TcpStream,
+    peer:       SocketAddr,
     delay:      Duration,
     time_out:   Duration,
     mut token:  Token,
@@ -50,23 +90,33 @@ pub(crate) async fn tarpit_connection(
 
     'otter: loop {
         if rand::random::<u8>() == 0x42 {
-          if let Ok(Some(t)) = send_chunk(
-              &mut sock,
-              &delay,
-              &time_out,
-              token,
-              &metrics,
-              b"Meow Meow Meow, but anymeow:\r\n",
-          ).await {
-              token = t;
-              metrics.sent_easteregg(&token)?;
-          } else {
-              break 'otter;
-          }
+            match send_chunk(
+                &mut sock,
+                &delay,
+                &time_out,
+                token,
+                &metrics,
+                b"Meow Meow Meow, but anymeow:\r\n",
+            ).await {
+                Ok(the_token) => {
+                    token = the_token;
+                    metrics.sent_easteregg(&token)?;
+                },
+                Err((connected, connection_time, error)) => {
+                    info!(
+                        "disconnect, peer: {}, duration: {:.2?}, error: \"{}\", clients: {}",
+                        peer,
+                        connection_time,
+                        error,
+                        connected,
+                    );
+                    break 'otter;
+                },
+            }
         }
 
         for chunk in banner.chunks(16) {
-            if let Ok(Some(t)) = send_chunk(
+            match send_chunk(
                 &mut sock,
                 &delay,
                 &time_out,
@@ -74,9 +124,19 @@ pub(crate) async fn tarpit_connection(
                 &metrics,
                 chunk,
             ).await {
-                token = t;
-            } else {
-                break 'otter;
+                Ok(the_token) => {
+                    token = the_token;
+                },
+                Err((connected, connection_time, error)) => {
+                    info!(
+                        "disconnect, peer: {}, duration: {:.2?}, error: \"{}\", clients: {}",
+                        peer,
+                        connection_time,
+                        error,
+                        connected,
+                    );
+                    break 'otter;
+                },
             }
         }
 

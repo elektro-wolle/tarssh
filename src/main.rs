@@ -1,4 +1,18 @@
-//! …
+//! A simple SSH tarpit, similar to endlessh.
+//!
+//! As per RFC 4253:
+//!
+//!   The server MAY send other lines of data before sending the version
+//!   string.  Each line SHOULD be terminated by a Carriage Return and Line
+//!   Feed.  Such lines MUST NOT begin with "SSH-", and SHOULD be encoded
+//!   in ISO-10646 UTF-8 [RFC3629] (language is not specified).  Clients
+//!   MUST be able to process such lines.
+//!
+//! In other words, you can fool SSH clients into waiting an extremely long time for a SSH handshake to even begin simply by waffling on endlessly.
+//! My high score is just over a fortnight.
+//!
+//! The intent of this is to increase the cost of mass SSH scanning – even clients that immediately disconnect after the first response are delayed a little,
+//! and that's one less free connection for the next attack.
 
 #![warn(clippy::all)]
 #![warn(missing_docs)]
