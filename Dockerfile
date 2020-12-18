@@ -7,12 +7,12 @@ WORKDIR /usr/src/tarssh
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src \
   && echo 'fn main() { }' >src/main.rs \
-  && cargo build --release --no-default-features --features drop_privs \
+  && cargo build --release \
   && rm -r target/release/.fingerprint/tarssh-*
 
 # Copy in the full project and build
 COPY . .
-RUN cargo build --release --no-default-features --features drop_privs
+RUN cargo build --release
 
 # Use a fairly minimal enviroment for deployment
 FROM debian:buster-slim
